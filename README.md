@@ -21,9 +21,12 @@ Running:
 
 1. Connect your device to your EQ2 via MIDI.
 2. Set `self.debug = False` within the script
-2. Run `./tremolo.py` in a terminal.
+3. Run `./tremolo.py` in a terminal.
 
 By default, this effects the second EQ channel and assumes the EQ is on MIDI channel 1, its default. Modify the script if your setup differs.
+
+If you're using Linux, you can edit `tremolo.desktop` to use the path corresponding to your system. Then you can copy it to ~/.local/share/applications, and follow it to see where everything else should go. This then lets you tap or click on an app instead of using a terminal.
+
 
 ## Potential Future Features
 * Select between Channels 1, 2, or both
