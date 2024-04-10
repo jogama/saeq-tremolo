@@ -20,6 +20,7 @@ Debian Dependencies:
 Running:
 
 1. Connect your device to your EQ2 via MIDI.
+2. Set `self.debug = False` within the script
 2. Run `./tremolo.py` in a terminal.
 
 By default, this effects the second EQ channel and assumes the EQ is on MIDI channel 1, its default. Modify the script if your setup differs.
