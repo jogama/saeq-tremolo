@@ -14,7 +14,7 @@ Turn your equalizer into a tremolo.
 Debian Dependencies:
 
 * python3-numpy, for math
-* python3-mido, for MIDI communication
+* python3-mido and python3-rtmidi, for MIDI communication
 * python3-gi, for the GUI
 
 Running:
