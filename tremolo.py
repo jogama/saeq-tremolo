@@ -29,14 +29,14 @@ WAVEFORM_SERIES: Final = {
 tril, sqrl, sinl, sawl = map(len, WAVEFORM_SERIES.values())
 assert(tril == sqrl == sinl == sawl)
 
-
 class GUI(Gtk.ApplicationWindow):
 
     # https://github.com/Taiko2k/GTK4PythonTutorial
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.series = WAVEFORM_SERIES["triangle"]
+        # depth might mutate this
+        self.series = list(WAVEFORM_SERIES["triangle"])
 
         self.set_default_size(600, 250)
         self.set_title("MyApp")
@@ -60,7 +60,7 @@ class GUI(Gtk.ApplicationWindow):
         self.rate.set_digits(0)  # Number of decimal places to use
         self.rate.set_range(0, 200)
         self.rate.set_draw_value(True)  # Show a label with current value
-        self.rate.set_value(100)  # Sets the current value/position
+        self.rate.set_value(1)  # Sets the current value/position
         self.cc_period_seconds = self.bpm2period(self.rate.get_value())
         self.rate.connect('value-changed', self.rate_changed)
         self.box1.append(self.rate)
@@ -70,6 +70,7 @@ class GUI(Gtk.ApplicationWindow):
         self.depth.set_range(0, 127)
         self.depth.set_draw_value(True)  # Show a label with current value
         self.depth.set_value(127)  # Sets the current value/position
+        self.depth_value = self.depth.get_value()
         self.depth.connect('value-changed', self.depth_changed)
         self.box1.append(self.depth)
 
@@ -134,7 +135,7 @@ class GUI(Gtk.ApplicationWindow):
     def waveform_selected(self, dropdown, data):
         # https://discourse.gnome.org/t/example-of-gtk-dropdown-with-search-enabled-without-gtk-expression/12748
         selection = dropdown.get_selected_item().get_string()  # this API feels inane
-        self.series = self.WAVEFORM_SERIES[selection]
+        self.series = list(WAVEFORM_SERIES[selection])
         self.apply_depth()
         print(selection)
             
@@ -146,7 +147,7 @@ class MyApp(Adw.Application):
 
         # should be coordinated with default/initial setting in waveform_dropdown above
         # or else, just set three global module-level variables. This is likely the way.
-        self.series = WAVEFORM_SERIES['triangle']
+        self.series = list(WAVEFORM_SERIES['triangle'])
         self.engaged = True
         self.cc_period = 1 # this is a lie for debugging
         # todo: this might be off by a factor of four?
@@ -164,7 +165,7 @@ class MyApp(Adw.Application):
     def on_activate(self, app):
         self.win = GUI(application=app)
 
-        self.series = self.win.series
+        self.series = list(self.win.series)
 
         # these two seem redundant
         self.engaged = self.win.effect_engaged
