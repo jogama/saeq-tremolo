@@ -1,0 +1,8 @@
+[Desktop Entry]
+Encoding=UTF-8
+Version=1.0
+Type=Application
+Terminal=false
+Exec=/home/mobian/.local/bin/tremolo.py
+Name=SAEQ TREMOLO
+Icon=/home/mobian/.local/share/tremolo_py_icon_most_waveforms.png
