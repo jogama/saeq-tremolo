@@ -23,14 +23,17 @@ it again."""
 # Series of trim level values. Default is Triangle wave.
 # Sine as it is here matches up well with triangle. Apologies for my dishonesty in using cosine.
 # Hill and Valley use the equation for a circle. Parabola could have worked as well and is simpler, but is more similar to sine. Circle is more distinct, so I feel it's better than parabola.
+DUTY_CYCLE_MAX: Final = 50  # Duty cycle denominator. I'm worried going too low would effectively DDoS the SA EQ2.
+    # An alternative to this time shifting is to use a dictionary of functions taking a duty cycle instead.
+    # The stress shifts from the EQ2's MIDI ingestion to this app..
 WAVEFORM_SERIES: Final = {
     "triangle": tuple(range(127)) + tuple(range(127, 0, -1)),
-    "square": tuple([0] * 127 + [127] * 127),
+    "square": tuple([127] * 127 + [0] * 127),
     "sine": tuple(map(round, cos(linspace(-pi, pi, 254)) * 64 + 64)),
     "sawtooth": tuple(map(round, linspace(0, 127, 254))),
     "reverse sawtooth": tuple(map(round, linspace(127, 0, 254))),
     "hill": tuple(map(round, sqrt(1 - square(linspace(-1, 1, 254))) * 127)),
-    "valley": tuple(map(round, (1 - sqrt(1 - square(linspace(-1, 1, 254)))) * 127)),
+    "valley": tuple(map(round, (1 - sqrt(1 - square(linspace(-1, 1, 254)))) * 127)),  # todo: offset so it works better with duty cycle
     # todo: add random
 }
 
@@ -45,12 +48,24 @@ def bpm2period(bpm):
     period = 1 / hz
     return period / len(WAVEFORM_SERIES["triangle"])
 
+def make_slider(a, b, default, callback):
+    # One could set the properties using the property string-names.
+    # The "set_range" would then be obviated by the "adjustment property", it seems.
+    # But setting the adjustment property looks like more work than making this function.
+    slider = Gtk.Scale()
+    slider.set_digits(0) # Number of decimal places to use
+    slider.set_range(a, b)
+    slider.set_draw_value(True)  # Show a label with current value
+    slider.set_value(default)  # Sets the current value/position
+    slider.connect("value-changed", callback)
+    return slider
+
+
 
 # Objects for cross-thread communication. They can only be assigned to once: here. GUI alone modifies these.
 # Cast to list for mutation by depth
 series = list(WAVEFORM_SERIES["triangle"])
-period_and_state = [bpm2period(1), True] # There is a better way, somewhere beyond my knowledge.
-
+cross_thread_vars = [bpm2period(60), False, DUTY_CYCLE_MAX]  # Period Seconds, Engaged, Duty Cycle Numerator. 
 
 class GUI(Gtk.ApplicationWindow):
     # https://github.com/Taiko2k/GTK4PythonTutorial
@@ -65,38 +80,30 @@ class GUI(Gtk.ApplicationWindow):
 
         self.set_child(self.box1)  # Horizontal box to window
 
-        # Jonathan attempts to add a drop down
+        # Drop down for waveforms
         self.waveform_dropdown = Gtk.DropDown.new_from_strings(tuple(WAVEFORM_SERIES.keys()))
 
         # https://discourse.gnome.org/t/example-of-gtk-dropdown-with-search-enabled-without-gtk-expression/12748
         self.waveform_dropdown.connect("notify::selected-item", self.waveform_selected)
         self.box1.append(self.waveform_dropdown)
 
-        self.rate = Gtk.Scale()
-        self.rate.set_digits(0)  # Number of decimal places to use
-        self.rate.set_range(1, 200)
-        self.rate.set_draw_value(True)  # Show a label with current value
-        self.rate.set_value(1)  # Sets the current value/position
-        period_and_state[0] = bpm2period(self.rate.get_value())
-        self.rate.connect("value-changed", self.rate_changed)
-        self.box1.append(self.rate)
+        # arguments are range start, end, start value, callback
+        self.rate = make_slider(1, 200, 1, self.rate_changed)
+        self.depth = make_slider(0, 127, 127, self.depth_changed)
+        self.duty = make_slider(0, DUTY_CYCLE_MAX, DUTY_CYCLE_MAX, self.duty_changed)
 
-        self.depth = Gtk.Scale()
-        self.depth.set_digits(0)  # Number of decimal places to use
-        self.depth.set_range(0, 127)
-        self.depth.set_draw_value(True)  # Show a label with current value
-        self.depth.set_value(127)  # Sets the current value/position
+        cross_thread_vars[0] = bpm2period(self.rate.get_value())
         self.depth_value = self.depth.get_value()
-        self.depth.connect("value-changed", self.depth_changed)
+        
+        self.box1.append(self.rate)
         self.box1.append(self.depth)
-
+        self.box1.append(self.duty)
+        
         # Add a box containing a switch
         self.switch_event = threading.Event()
         self.switch_box = Gtk.CenterBox(orientation=Gtk.Orientation.HORIZONTAL)
         self.switch = Gtk.Switch()
-        switch_default = True  # todo: remove this line of code and...
-        self.switch.set_active(switch_default)
-        period_and_state[1] = switch_default  # ... set this directly from switch state
+        self.switch.set_active(cross_thread_vars[1])
         self.switch.connect("state-set", self.switch_switched)
         self.switch_box.set_center_widget(self.switch)  # There's likely a better way.
         self.box1.append(self.switch_box)
@@ -109,11 +116,8 @@ class GUI(Gtk.ApplicationWindow):
 
         app = self.get_application()
         self.sm = app.get_style_manager()
-
-    def rate_changed(self, slider):
-        bpm = int(slider.get_value())  # todo: remove this
-        period_and_state[0] = bpm2period(bpm)
-        print(bpm)  # ... and this. The prints should be in the other class.
+        if not cross_thread_vars[1]:
+            self.sm.set_color_scheme(Adw.ColorScheme.PREFER_DARK)
 
     def apply_depth(self):
         # "Typically a depth knob will allow you to dial the lowest volume point
@@ -129,12 +133,24 @@ class GUI(Gtk.ApplicationWindow):
         self.apply_depth()
         print(int(slider.get_value()))
 
+    def duty_changed(self, slider):
+        # "Duty Cycle should actually be ... Controlling the on/off time ratio in the cycle.
+        # So at 0% there is no sound, at 100% all signal is let through. "
+        # https://tremolo-project.blogspot.com/2017/09/line-6-helix-all-tremolo-modes-examined.html
+        cross_thread_vars[2] = slider.get_value()
+        print("duty", slider.get_value())
+
+    def rate_changed(self, slider):
+        bpm = int(slider.get_value())  # todo: remove this
+        cross_thread_vars[0] = bpm2period(bpm)
+        print(bpm)  # ... and this. The prints should be in the other class.
+
     def switch_switched(self, switch, state):
         if state:
-            period_and_state[1] = True
+            cross_thread_vars[1] = True
             self.sm.set_color_scheme(Adw.ColorScheme.PREFER_LIGHT)  # useful for on-off
         else:
-            period_and_state[1] = False
+            cross_thread_vars[1] = False
             self.sm.set_color_scheme(Adw.ColorScheme.PREFER_DARK)
         print(f"The switch has been switched {'on' if state else 'off'}")
 
@@ -157,8 +173,9 @@ class MyApp(Adw.Application):
         self.debug = True
         if not self.debug:
             inport = mido.open_input("Source Audio EQ2 MIDI 1")  # todo: try removing this line
-            self.outport = mido.open_output("Source Audio EQ2 MIDI 1")
-            self.set_trim = lambda v: mido.Message("control_change", channel=0, control=2, value=v)
+            outport = mido.open_output("Source Audio EQ2 MIDI 1")
+            self.set_trim = lambda v: outport.send(
+                mido.Message("control_change", channel=0, control=2, value=v))
         else:
             self.set_trim = lambda v: print("Channel 2 Trim set to ", v)
 
@@ -172,25 +189,42 @@ class MyApp(Adw.Application):
         self.win.present()
 
     def run_tremolo(self):
+        has_been_reset = False
+        
+        # todo: this seriously needs to be event-driven. It pins a CPU at 100% when effect is bypassed
         while not self.closing:
-            # period_and_state is a 2-list, for thread reasons.
-            # period is the MIDI CC period between messages: a number.
-            # state is whether or not the effect is engaged: boolean.
-            if period_and_state[1]:
+            # cross_thread_vars is a 3-list, for thread reasons. Consider a namedtuple.
+            # 0: period is the MIDI CC period between messages: a number.
+            # 1: state is whether or not the effect is engaged: boolean.
+            # 2: duty is the numerator for how large the duty cycle fraction is
+            if cross_thread_vars[1]:
                 has_been_reset = False
                 for level in series:
-                    if period_and_state[1]:
-                        if self.debug:
-                            self.set_trim(level)
-                        else:
-                            self.outport.send(self.set_trim(level))
-                        time.sleep(period_and_state[0])
-                    elif not period_and_state[1]:
-                        break
-
-                    if self.closing:
-                        break
-            else:
+                    if self.closing or not cross_thread_vars[1]:
+                        break # if window is closing or effect is not engaged
+                    
+                    if cross_thread_vars[2] == DUTY_CYCLE_MAX:
+                        # Avoid unnecessary multiplication & division
+                        self.set_trim(level)
+                        time.sleep(cross_thread_vars[0])
+                    elif cross_thread_vars[2] == 0:
+                        self.set_trim(0)                        
+                        time.sleep(cross_thread_vars[0])
+                    else:
+                        self.set_trim(level)
+                        seconds = cross_thread_vars[0] * cross_thread_vars[2] / DUTY_CYCLE_MAX
+                        if seconds < 0.001:
+                            # Estimate EQ2 ingest limit at 1ms. Note that we are't changing presets!
+                            # https://www.thegearpage.net/board/index.php?threads/source-audio-eq2-programmable-equalizer.2112543/post-32393880
+                            # https://www.thegearpage.net/board/index.php?threads/source-audio-eq2-programmable-equalizer.2112543/post-32387826
+                            print("WARNING: CC Message period is below 1ms!!")
+                        time.sleep(seconds)
+                if cross_thread_vars[1] and cross_thread_vars[2] < DUTY_CYCLE_MAX:
+                    cycle_count = len(WAVEFORM_SERIES["triangle"])
+                    off_duty = (DUTY_CYCLE_MAX - cross_thread_vars[2]) / DUTY_CYCLE_MAX
+                    time.sleep(cycle_count * cross_thread_vars[0] * off_duty)
+                    
+            else:  # if not engaged
                 if not has_been_reset:
                     self.set_trim(127)
                     has_been_reset = True

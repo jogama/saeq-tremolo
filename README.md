@@ -66,3 +66,15 @@ for i in range(length):
 		self.outport.send(self.set_trim2(series[offset]))  
 	time.sleep(period_and_state[0])  
 ```
+
+Better would likely be  
+
+```
+self.set_trim1 = lambda v: mido.Message("control_change", channel=0, control=1, value=v)  
+self.set_trim2 = lambda v: mido.Message("control_change", channel=0, control=2, value=v)  
+for level in series:  
+	self.outport.send(self.set_trim1(level))  
+	if panning:
+		self.outport.send(self.set_trim2(127 - level))  
+	time.sleep(period_and_state[0])  
+```
