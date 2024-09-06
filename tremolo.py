@@ -6,7 +6,7 @@ import sys
 from typing import Final
 
 import mido
-from numpy import cos, linspace, pi, sqrt, square
+from numpy import concatenate, cos, linspace, pi, sqrt, square
 
 import gi
 
@@ -20,11 +20,7 @@ deployment has been painful for me and I'd rather this than experience
 it again."""
 
 
-# Series of trim level values. Default is Triangle wave.
-# Sine as it is here matches up well with triangle. Apologies for my dishonesty in using cosine.
-# Hill and Valley use the equation for a circle. Parabola could have worked as well and is simpler, but is more similar to sine. Circle is more distinct, so I feel it's better than parabola.
 DUTY_CYCLE_MAX: Final = 50  # Duty cycle denominator. I'm worried going too low would effectively DDoS the SA EQ2.
-# An alternative to this time shifting is to use a dictionary of functions taking a duty cycle instead.
 # The stress shifts from the EQ2's MIDI ingestion to this app..
 WAVEFORM_SERIES: Final = {
     "triangle": tuple(range(127)) + tuple(range(127, 0, -1)),
@@ -36,9 +32,68 @@ WAVEFORM_SERIES: Final = {
     "valley": tuple(map(round, (1 - sqrt(1 - square(linspace(-1, 1, 254)))) * 127)),  # todo: offset so it works better with duty cycle
     # todo: add random
 }
-
-# Lenths of all series must be the same
+# Lengths of all series must be the same
 assert len(set(map(len, WAVEFORM_SERIES.values()))) == 1
+
+
+def make_waveform(series, depth, duty):
+    """Return a series of trim level values.
+
+    duty ∈ [0, DUTY_CYCLE_MAX]
+
+            # "Typically a depth knob will allow you to dial the lowest volume point
+        # https://tremolo-project.blogspot.com/2017/08/matthews-effects-conductor.html
+    depth ∈ [0, 127]
+
+    Initially, a static waveform series was modified in time to apply
+    the duty cycle.  This didn't work on the initial try. This
+    function is more expensive than a static dictionary of
+    series. However, the expense is only paid when the new waveform
+    series is calculated: when a slider is moved. This seemed easier
+    to understand than the previous time-shifting method.
+    """
+    # todo: This function and the WAVEFORM_SERIES constant should be merged.
+    # This is redundant and thus, error prone if one but not the other is changed.
+    period = 254  # this permits a right triangle for triangle wave and a circular hill.
+    duty = round(duty * (period / 2) / DUTY_CYCLE_MAX)
+
+    if depth == 0:
+        return [0] * period
+    if duty == 0:
+        return [127 - depth] * period
+
+    if series == "triangle":
+        # Sometimes this doesn't contain 127, but for duty>9 it always has something above 120.
+        triangle = list(map(round, 127 - abs(linspace(1 - depth, depth, 2 * duty))))
+        return triangle + [127 - depth] * (period - 2 * duty)
+    elif series == "square":
+        return [127] * duty + [127 - depth] * (period - duty)
+    elif series == "sine":
+        # Sine as it is here matches up well with triangle. Apologies for my dishonesty in using cosine.
+        sinusoid = (cos(linspace(-pi, pi, 2 * duty)) + 1) / 2  # ∈ [0, 1]
+        sinusoid = depth * sinusoid + 127 - depth  # ∈ [127-depth, 127]
+        sinusoid = list(map(round, sinusoid))
+        return sinusoid + [127 - depth] * (period - 2 * duty)
+    elif series == "sawtooth":
+        sawtooth = list(map(round, linspace(127 - depth, 127, 2 * duty)))
+        return sawtooth + [127 - depth] * (period - 2 * duty)
+    elif series == "reverse sawtooth":
+        sawtooth = list(map(round, linspace(127, 127 - depth, 2 * duty)))
+        return sawtooth + [127 - depth] * (period - 2 * duty)
+    elif series == "hill" or series == "valley":
+        # Hill and Valley use the equation for a circle.
+        # Parabola could have worked as well and is simpler,
+        # but is more similar to sine. Circle is more distinct, so I feel it's better than parabola.
+        hill = lambda a, b, l: sqrt(1 - square(linspace(a, b, l)))
+        if series == "hill":
+            hill = depth * hill(-1, 1, 2 * duty) + 127 - depth  # same math from "sine".
+            hill = list(map(round, hill))
+            return hill + [127 - depth] * (period - 2 * duty)
+        elif series == "valley":
+            valley = 1 - concatenate((hill(0, 1, duty), hill(-1, 0, duty)))
+            valley = depth * valley + 127 - depth
+            valley = list(map(round, valley))
+            return valley + [127 - depth] * (period - 2 * duty)
 
 
 def bpm2period(bpm):
@@ -65,10 +120,13 @@ def make_slider(a, b, default, callback):
 # Objects for cross-thread communication. They can only be declared once: here. GUI alone modifies these.
 # Cast to list for mutation by depth
 # todo: save the setting when closing the app. I'd just edit this same tremolo.py file wherever it's deployed, if !DEBUG.
-series = list(WAVEFORM_SERIES["triangle"])
-thd_period_in_seconds = bpm2period(60)  # period is the MIDI CC period between messages: a number.
-thd_duty_cycle_numerator = DUTY_CYCLE_MAX  # duty is the numerator for how large the duty cycle fraction is
-thd_event_effect_engaged = threading.Event()  # official docs & https://stackoverflow.com/a/14804328
+series = make_waveform("triangle", 127, DUTY_CYCLE_MAX)
+thd_period_in_seconds = bpm2period(
+    60
+)  # period is the MIDI CC period between messages: a number.
+thd_event_effect_engaged = (
+    threading.Event()
+)  # official docs & https://stackoverflow.com/a/14804328
 thd_division = [1]
 
 
@@ -86,14 +144,18 @@ class GUI(Gtk.ApplicationWindow):
         self.set_child(self.box1)  # Horizontal box to window
 
         # Drop down for waveforms
-        self.waveform_dropdown = Gtk.DropDown.new_from_strings(tuple(WAVEFORM_SERIES.keys()))
+        self.waveform_dropdown = Gtk.DropDown.new_from_strings(
+            tuple(WAVEFORM_SERIES.keys())
+        )
         # https://discourse.gnome.org/t/example-of-gtk-dropdown-with-search-enabled-without-gtk-expression/12748
         self.waveform_dropdown.connect("notify::selected-item", self.waveform_selected)
 
         # self.division = Gtk.Entry()
         # self.division.set_text('Enter Division (e.g. "1 4 4 3 3 3 2)"')
         # self.division.connect('activate', self.division_entered)
-        self.box1.append(self.waveform_dropdown)  # comment or delete line if working on division
+        self.box1.append(
+            self.waveform_dropdown
+        )  # comment or delete line if working on division
         # self.waveform_and_divison_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         # self.waveform_and_divison_box.append(self.waveform_dropdown)
         # self.waveform_and_divison_box.append(self.division)
@@ -106,10 +168,14 @@ class GUI(Gtk.ApplicationWindow):
 
         thd_period_in_seconds = bpm2period(self.rate.get_value())
         self.depth_value = self.depth.get_value()
+        self.duty_value = self.duty.get_value()
+        self.waveform_name = "triangle"
 
         self.box1.append(self.rate)
         self.box1.append(self.depth)
-        # self.box1.append(self.duty) # todo: this doesn't seem to be working. At least it doesn't seem to be interfering.
+        self.box1.append(
+            self.duty
+        )  # todo: this doesn't seem to be working. At least it doesn't seem to be interfering.
 
         # Add a box containing a switch
         self.switch_box = Gtk.CenterBox(orientation=Gtk.Orientation.HORIZONTAL)
@@ -130,18 +196,9 @@ class GUI(Gtk.ApplicationWindow):
         if not thd_event_effect_engaged.is_set():
             self.sm.set_color_scheme(Adw.ColorScheme.PREFER_DARK)
 
-    def apply_depth(self):
-        # "Typically a depth knob will allow you to dial the lowest volume point
-        # https://tremolo-project.blogspot.com/2017/08/matthews-effects-conductor.html
-        if self.depth_value < 127:
-            bottom = 127 - self.depth_value  # lowest trim level
-            for i in range(len(series)):
-                if series[i] < bottom:
-                    series[i] = bottom
-
     def depth_changed(self, slider):
         self.depth_value = int(slider.get_value())
-        self.apply_depth()
+        self.update_series()
         print(int(slider.get_value()))
 
     def division_entered(self, entry_box):
@@ -168,7 +225,8 @@ class GUI(Gtk.ApplicationWindow):
         # "Duty Cycle should actually be ... Controlling the on/off time ratio in the cycle.
         # So at 0% there is no sound, at 100% all signal is let through. "
         # https://tremolo-project.blogspot.com/2017/09/line-6-helix-all-tremolo-modes-examined.html
-        thd_duty_cycle_numerator = slider.get_value()
+        self.duty_value = slider.get_value()
+        self.update_series()
         print("duty", slider.get_value())
 
     def rate_changed(self, slider):
@@ -185,14 +243,21 @@ class GUI(Gtk.ApplicationWindow):
             self.sm.set_color_scheme(Adw.ColorScheme.PREFER_DARK)
         print(f"The switch has been switched {'on' if state else 'off'}")
 
+    def update_series(self):
+        new_waveform_series = make_waveform(
+            self.waveform_name, self.depth_value, self.duty_value
+        )
+        for i in range(len(series)):
+            series[i] = new_waveform_series[i]
+
     def waveform_selected(self, dropdown, data):
         # https://discourse.gnome.org/t/example-of-gtk-dropdown-with-search-enabled-without-gtk-expression/12748
-        selection = dropdown.get_selected_item().get_string()  # this API feels inane
+        self.waveform_name = (
+            dropdown.get_selected_item().get_string()
+        )  # this API feels inane
         # An assignment seems to create a new list object. I need to keep the same obj for thread communication.
-        for i in range(len(series)):
-            series[i] = WAVEFORM_SERIES[selection][i]
-        self.apply_depth()
-        print(selection)
+        self.update_series()
+        print(self.waveform_name)
 
 
 class MyApp(Adw.Application):
@@ -237,37 +302,11 @@ class MyApp(Adw.Application):
                         if self.closing or not thd_event_effect_engaged.is_set():
                             break  # if window is closing or effect is not engaged
 
-                        if thd_duty_cycle_numerator == DUTY_CYCLE_MAX:
-                            # Avoid unnecessary multiplication & division
-                            self.set_trim(level)
-                            time.sleep(thd_period_in_seconds / divisor)
-                        elif thd_duty_cycle_numerator == 0:
-                            # this could be event-driven instead on duty>0.
-                            self.set_trim(0)
-                            time.sleep(thd_period_in_seconds)
-                        else:
-                            self.set_trim(level)
-                            seconds = (
-                                thd_period_in_seconds
-                                * thd_duty_cycle_numerator
-                                / DUTY_CYCLE_MAX
-                                / divisor
-                            )
-                            if seconds < 0.001:
-                                # Estimate EQ2 ingest limit at 1ms. Note that we are't changing presets!
-                                # https://www.thegearpage.net/board/index.php?threads/source-audio-eq2-programmable-equalizer.2112543/post-32393880
-                                # https://www.thegearpage.net/board/index.php?threads/source-audio-eq2-programmable-equalizer.2112543/post-32387826
-                                print("WARNING: CC Message period is below 1ms!!")
-                            time.sleep(seconds)
-                    if (
-                        thd_event_effect_engaged.is_set()
-                        and thd_duty_cycle_numerator < DUTY_CYCLE_MAX
-                    ):
+                        self.set_trim(level)
+                        time.sleep(thd_period_in_seconds / divisor)
+                    if thd_event_effect_engaged.is_set():
                         cycle_count = len(WAVEFORM_SERIES["triangle"])
-                        off_duty = (
-                            DUTY_CYCLE_MAX - thd_duty_cycle_numerator
-                        ) / DUTY_CYCLE_MAX
-                        time.sleep(cycle_count * thd_period_in_seconds * off_duty)
+                        time.sleep(cycle_count * thd_period_in_seconds)
 
             else:  # if not engaged
                 if not has_been_reset:
